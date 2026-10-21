@@ -104,9 +104,7 @@ if (( ! VERIFY )); then
 fi
 
 [[ -n "$KEYRING" && -r "$KEYRING" ]] || die "ISO downloaded but NOT verified. Supply --keyring with a trusted Gentoo release keyring. See README.md."
-# Gentoo autobuilds commonly publish a digest file adjacent to each image.
-# Try the known .DIGESTS and .DIGESTS.asc naming convention, then require
-# signature verification before reading any checksum from it.
+
 DIGEST="$WORK/$ISO_NAME.DIGESTS"
 SIG="$WORK/$ISO_NAME.DIGESTS.asc"
 curl --fail --location --silent --show-error --proto '=https' --tlsv1.2 \
@@ -126,8 +124,6 @@ else
 fi
 good "Signed digest file signature is valid."
 
-# Support the standard sha512sum-style entries and Gentoo's common
-# 'SHA512 (filename) = hash' digest notation. Reject ambiguous/missing entries.
 EXPECTED="$(awk -v n="$ISO_NAME" '
   $1 ~ /^[[:xdigit:]]{128}$/ && ($2 == n || $2 == "*" n) { print tolower($1); exit }
   $1 == "SHA512" && $2 == "(" n ")" && $3 == "=" && $4 ~ /^[[:xdigit:]]{128}$/ { print tolower($4); exit }

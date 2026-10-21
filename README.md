@@ -2,12 +2,6 @@
 
 A lightweight Bash utility for downloading official Gentoo Linux installation media with resumable downloads and cryptographic verification.
 
-Inspired by [Awshly/Debian-Downloader](https://github.com/Awshly/Debian-Downloader).
-
-## Status
-
-**Early development (0.1.0-dev).** This is a new Gentoo-specific implementation, not a port that has been validated against every current Gentoo mirror layout. Test it and review the Gentoo verification instructions before relying on an ISO for installation.
-
 ## Planned first release
 
 - Gentoo amd64 minimal installation ISO

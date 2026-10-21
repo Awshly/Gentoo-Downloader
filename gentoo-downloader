@@ -1,0 +1,139 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+VERSION="0.1.0-dev"
+MODE="minimal"
+ARCH="amd64"
+OUT_DIR="$PWD"
+ISO_URL=""
+KEYRING=""
+VERIFY=1
+
+RED=$'\033[0;31m'; GREEN=$'\033[0;32m'; YELLOW=$'\033[0;33m'; RESET=$'\033[0m'
+info(){ printf '[INFO] %s\n' "$*"; }
+good(){ printf '%s[ OK ]%s %s\n' "$GREEN" "$RESET" "$*"; }
+warn(){ printf '%s[WARN]%s %s\n' "$YELLOW" "$RESET" "$*" >&2; }
+die(){ printf '%s[FAIL]%s %s\n' "$RED" "$RESET" "$*" >&2; exit 1; }
+
+usage(){ cat <<'EOF'
+Gentoo Downloader — official Gentoo installation media downloader
+
+Usage: ./gentoo-downloader [options]
+
+  --type minimal|livegui   Media type (default: minimal)
+  --arch amd64             Architecture (currently amd64 only)
+  --output DIR             Destination directory (default: current directory)
+  --url URL                Direct official Gentoo ISO URL
+  --keyring FILE           Trusted keyring for Gentoo digest signature verification
+  --no-verify              Skip verification (not recommended)
+  --version                Print version
+  -h, --help               Show this help
+
+Requirements: bash, curl, gpg or gpgv, sha512sum, awk, grep, sed, mktemp.
+
+Interrupted downloads retain a .part file and can be resumed by rerunning.
+Verification is enabled by default. A trusted keyring is required.
+EOF
+}
+
+while (($#)); do
+  case "$1" in
+    --type) [[ $# -ge 2 ]] || die "--type needs a value"; MODE="$2"; shift 2 ;;
+    --arch) [[ $# -ge 2 ]] || die "--arch needs a value"; ARCH="$2"; shift 2 ;;
+    --output) [[ $# -ge 2 ]] || die "--output needs a value"; OUT_DIR="$2"; shift 2 ;;
+    --url) [[ $# -ge 2 ]] || die "--url needs a value"; ISO_URL="$2"; shift 2 ;;
+    --keyring) [[ $# -ge 2 ]] || die "--keyring needs a value"; KEYRING="$2"; shift 2 ;;
+    --no-verify) VERIFY=0; shift ;;
+    -h|--help) usage; exit 0 ;;
+    --version) printf 'Gentoo Downloader %s\n' "$VERSION"; exit 0 ;;
+    *) die "Unknown option: $1 (use --help)" ;;
+  esac
+done
+
+for c in curl sha512sum awk grep sed mktemp; do
+  command -v "$c" >/dev/null 2>&1 || die "Missing dependency: $c"
+done
+if (( VERIFY )); then
+  command -v gpgv >/dev/null 2>&1 || command -v gpg >/dev/null 2>&1 || die "Missing dependency: gpg or gpgv"
+fi
+[[ "$ARCH" == amd64 ]] || die "Only amd64 is supported in this initial version."
+[[ "$MODE" == minimal || "$MODE" == livegui ]] || die "--type must be minimal or livegui"
+
+mkdir -p -- "$OUT_DIR"
+OUT_DIR="$(cd -- "$OUT_DIR" && pwd -P)"
+
+BASE="https://distfiles.gentoo.org/releases/amd64/autobuilds"
+if [[ -z "$ISO_URL" ]]; then
+  case "$MODE" in
+    minimal) SUBDIR="current-install-amd64-minimal"; LATEST="latest-install-amd64-minimal.txt" ;;
+    livegui) SUBDIR="current-livegui-amd64"; LATEST="latest-livegui-amd64.txt" ;;
+  esac
+  IMAGE_DIR="$BASE/$SUBDIR"
+  LATEST_TEXT="$(curl --fail --location --silent --show-error --proto '=https' --tlsv1.2 "$IMAGE_DIR/$LATEST")" || die "Could not fetch Gentoo's latest-image pointer at $IMAGE_DIR/$LATEST"
+  ISO_NAME="$(printf '%s\n' "$LATEST_TEXT" | awk 'NF && $1 !~ /^#/ { print $1; exit }')"
+  [[ "$ISO_NAME" == *.iso && "$ISO_NAME" != */* ]] || die "Could not safely parse ISO filename from latest-image pointer."
+  ISO_URL="$IMAGE_DIR/$ISO_NAME"
+else
+  [[ "$ISO_URL" == https://distfiles.gentoo.org/releases/amd64/autobuilds/* ]] || die "--url must use official distfiles.gentoo.org Gentoo autobuilds HTTPS."
+  ISO_NAME="${ISO_URL##*/}"
+  [[ "$ISO_NAME" == *.iso && "$ISO_NAME" != */* ]] || die "--url must point directly to an .iso file"
+  IMAGE_DIR="${ISO_URL%/*}"
+fi
+
+DEST="$OUT_DIR/$ISO_NAME"
+PART="$DEST.part"
+WORK="$(mktemp -d)"
+trap 'rm -rf -- "$WORK"' EXIT
+
+if [[ -e "$DEST" ]]; then
+  read -r -p "$DEST already exists. Replace it? [y/N] " ans
+  [[ "$ans" =~ ^[Yy]$ ]] || die "Cancelled"
+  mv -- "$DEST" "$DEST.backup.$(date +%Y%m%d%H%M%S)"
+fi
+
+info "Downloading $ISO_NAME from official Gentoo HTTPS infrastructure"
+curl --fail --location --show-error --progress-bar --proto '=https' --tlsv1.2 \
+  --retry 3 --retry-delay 2 --continue-at - --output "$PART" "$ISO_URL" \
+  || die "Download failed; partial file retained at $PART"
+mv -- "$PART" "$DEST"
+good "Download completed: $DEST"
+
+if (( ! VERIFY )); then
+  warn "Verification skipped; this ISO is NOT authenticated."
+  exit 0
+fi
+
+[[ -n "$KEYRING" && -r "$KEYRING" ]] || die "ISO downloaded but NOT verified. Supply --keyring with a trusted Gentoo release keyring. See README.md."
+# Gentoo autobuilds commonly publish a digest file adjacent to each image.
+# Try the known .DIGESTS and .DIGESTS.asc naming convention, then require
+# signature verification before reading any checksum from it.
+DIGEST="$WORK/$ISO_NAME.DIGESTS"
+SIG="$WORK/$ISO_NAME.DIGESTS.asc"
+curl --fail --location --silent --show-error --proto '=https' --tlsv1.2 \
+  -o "$DIGEST" "$IMAGE_DIR/$ISO_NAME.DIGESTS" \
+  || die "ISO saved, but the adjacent .DIGESTS file could not be fetched."
+curl --fail --location --silent --show-error --proto '=https' --tlsv1.2 \
+  -o "$SIG" "$IMAGE_DIR/$ISO_NAME.DIGESTS.asc" \
+  || die "ISO saved, but the adjacent .DIGESTS.asc signature could not be fetched."
+
+if command -v gpgv >/dev/null 2>&1; then
+  gpgv --keyring "$KEYRING" "$SIG" "$DIGEST" || die "Gentoo digest signature verification failed; ISO is NOT verified."
+else
+  GNUPGHOME="$WORK/gnupg"; mkdir -m 700 "$GNUPGHOME"
+  gpg --batch --no-options --homedir "$GNUPGHOME" --no-default-keyring \
+    --keyring "$KEYRING" --verify "$SIG" "$DIGEST" \
+    || die "Gentoo digest signature verification failed; ISO is NOT verified."
+fi
+good "Signed digest file signature is valid."
+
+# Support the standard sha512sum-style entries and Gentoo's common
+# 'SHA512 (filename) = hash' digest notation. Reject ambiguous/missing entries.
+EXPECTED="$(awk -v n="$ISO_NAME" '
+  $1 ~ /^[[:xdigit:]]{128}$/ && ($2 == n || $2 == "*" n) { print tolower($1); exit }
+  $1 == "SHA512" && $2 == "(" n ")" && $3 == "=" && $4 ~ /^[[:xdigit:]]{128}$/ { print tolower($4); exit }
+' "$DIGEST")"
+[[ "$EXPECTED" =~ ^[[:xdigit:]]{128}$ ]] || die "Could not parse a SHA-512 entry for $ISO_NAME from signed digest file."
+ACTUAL="$(sha512sum "$DEST" | awk '{print tolower($1)}')"
+[[ "$ACTUAL" == "$EXPECTED" ]] || die "SHA-512 mismatch; ISO is NOT verified."
+good "SHA-512 checksum matches the signed Gentoo digest."
+good "Verified Gentoo ISO: $DEST"
